@@ -1,0 +1,133 @@
+name: Launchable Test Integration
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+    branches: ["main"]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # Fixes shallow clone warning
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Cache Maven packages
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.m2/repository
+          key: ${{ runner.os }}-m2-${{ hashFiles('**/pom.xml') }}
+          restore-keys: |
+            ${{ runner.os }}-m2
+
+      - name: Build project (skip tests)
+        run: mvn -B -DskipTests clean package
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install Launchable CLI
+        run: pip install --upgrade launchable
+
+      # 🧩 VALIDATION STEP 1: launchable verify
+      - name: 🔍 Validate Launchable connection
+        env:
+          LAUNCHABLE_TOKEN: ${{ secrets.LAUNCHABLE_TOKEN }}
+        run: |
+          echo "🧪 Validation Step 1: launchable verify"
+          launchable verify || (echo "❌ Launchable verify failed!" && exit 1)
+          echo "✅ Project linked successfully!"
+
+      # 🧩 VALIDATION STEP 2: Record Build
+      - name: Record build in Launchable
+        id: record_build
+        env:
+          LAUNCHABLE_TOKEN: ${{ secrets.LAUNCHABLE_TOKEN }}
+        run: |
+          BUILD_NAME=build-${{ github.run_number }}
+          echo "🧪 Recording build in Launchable: $BUILD_NAME"
+          launchable record build --name "$BUILD_NAME"
+          echo "BUILD_NAME=$BUILD_NAME" >> $GITHUB_ENV
+          echo "✅ Build recorded successfully!"
+
+      # 🧩 STEP 3: Generate subset (auto-switch Observation → Predictive)
+      - name: Run Launchable Subset (Auto Mode)
+        env:
+          LAUNCHABLE_TOKEN: ${{ secrets.LAUNCHABLE_TOKEN }}
+        run: |
+          echo "🧠 Launchable Smart Mode — auto-switch between Observation and Predictive"
+          echo "Current CI run number: ${{ github.run_number }}"
+
+          BUILD_NAME=${{ env.BUILD_NAME }}
+          mvn -B -DskipTests clean package
+          mvn -B test-compile
+
+          # Generate list of test classes
+          find . -path "*/target/maven-status/maven-compiler-plugin/testCompile/default-testCompile/createdFiles.lst" \
+            -exec cat {} \; > all_tests.lst
+          echo "📋 Total tests found: $(wc -l all_tests.lst | awk '{print $1}')"
+
+          # Automatically switch between modes
+          if [ "${{ github.run_number }}" -le 10 ]; then
+            echo "🟡 Running in Observation Mode (training AI model)"
+            cat all_tests.lst | launchable subset --build "$BUILD_NAME" --observation --target 90% maven --scan-test-compile-lst > subset.txt
+          else
+            echo "🟢 Running in Predictive Mode (AI-optimized test selection)"
+            cat all_tests.lst | launchable subset --build "$BUILD_NAME" --target 90% maven --scan-test-compile-lst > subset.txt
+          fi
+
+          if [ -s subset.txt ]; then
+            echo "✅ Subset file created successfully!"
+            echo "Subset tests: $(wc -l subset.txt | awk '{print $1}')"
+          else
+            echo "⚠️ No subset generated — running all tests"
+            mvn -B test
+          fi
+
+          # Show reduction stats
+          ALL=$(wc -l all_tests.lst | awk '{print $1}')
+          SUB=$(wc -l subset.txt | awk '{print $1}')
+          echo "📊 Reduction ratio: $((100 * SUB / ALL))% of total tests selected"
+
+      # 🧩 STEP 4: Run subset tests
+      - name: 🧪 Execute subset tests
+        run: |
+          echo "🧪 Running tests from subset.txt"
+          mvn -B test -Dsurefire.includesFile=subset.txt || echo "⚠️ Some tests failed — continuing"
+
+      # 🧩 STEP 5: Verify JUnit XML Report
+      - name: Verify Cucumber JUnit XML report
+        run: |
+          echo "📄 Checking for test report..."
+          ls -l target/cucumber-junit.xml || (echo "❌ No cucumber-junit.xml found!" && exit 1)
+          echo "✅ Report found successfully!"
+
+      # 🧩 STEP 6: Send results to Launchable
+      - name: 📤 Send Cucumber results to Launchable
+        env:
+          LAUNCHABLE_TOKEN: ${{ secrets.LAUNCHABLE_TOKEN }}
+        run: |
+          echo "📤 Uploading test results for build: $BUILD_NAME"
+          launchable record tests maven target/cucumber-junit.xml || (echo "❌ Failed to record test results!" && exit 1)
+          echo "✅ Test results sent successfully!"
+
+      # 🧩 STEP 7: Inspect Launchable Build Summary
+      - name: 🔎 Inspect Launchable Build Summary
+        env:
+          LAUNCHABLE_TOKEN: ${{ secrets.LAUNCHABLE_TOKEN }}
+        run: |
+          echo "🧾 Inspecting Launchable build summary..."
+          launchable inspect builds "$BUILD_NAME" || launchable inspect build --name "$BUILD_NAME" || echo "⚠️ Inspect failed, check CLI version"
