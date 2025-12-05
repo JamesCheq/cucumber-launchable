@@ -12,7 +12,7 @@ public class LoginPage {
 	private ElementActionUtils actions;
 	
 
-	private By email = By.id("Email");
+	private By email = By.id("Email1");
 	private By password = By.id("Password");
 	private By loginBtn = By.xpath("//input[@value='Log in']");
 
